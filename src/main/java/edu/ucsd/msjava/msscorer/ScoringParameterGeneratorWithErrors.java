@@ -474,7 +474,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             return;
         }
 
-        rankDistTable = new Hashtable<Partition, Hashtable<IonType, Float[]>>();
+        rankDistTable = new Hashtable<Partition, Map<IonType, Float[]>>();
         this.maxRank = maxRank;
 
         for (Partition partition : partitionSet) {
@@ -829,7 +829,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             return;
         assert (smoothingRanks.length == smoothingWindowSize.length);
         for (Partition partition : rankDistTable.keySet()) {
-            Hashtable<IonType, Float[]> table = this.rankDistTable.get(partition);
+            Map<IonType, Float[]> table = this.rankDistTable.get(partition);
             for (IonType ion : table.keySet()) {
                 Float[] freq = table.get(ion);
                 Float[] smoothedFreq = new Float[freq.length];
