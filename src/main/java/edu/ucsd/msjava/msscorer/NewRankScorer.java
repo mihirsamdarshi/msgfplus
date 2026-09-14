@@ -116,23 +116,48 @@ public class NewRankScorer implements NewAdditiveScorer {
     }
 
     public float getErrorScore(Partition part, float error) {
+        return getErrorScore(this.ionErrDistTable.get(part), this.noiseErrDistTable.get(part), error);
+    }
+
+    /**
+     * Error score from the ion and noise error distributions of a partition (see getIonErrDist and getNoiseErrDist),
+     * for callers that score many edges of the same partition
+     */
+    float getErrorScore(Float[] ionErrHist, Float[] noiseErrHist, float error) {
         int errIndex = Math.round(error * errorScalingFactor);
         if (errIndex > errorScalingFactor)
             errIndex = errorScalingFactor;
         else if (errIndex < -errorScalingFactor)
             errIndex = -errorScalingFactor;
-        Float[] ionErrHist = this.ionErrDistTable.get(part);
 //		float noiseProb = (errorScalingFactor-Math.abs(errIndex))/(errorScalingFactor*errorScalingFactor);
 //		if(noiseProb == 0)
 //			noiseProb = 1f/(errorScalingFactor*errorScalingFactor);
 //		return (float)Math.log(ionErrHist[errIndex+errorScalingFactor]/noiseProb);
         errIndex += errorScalingFactor;
-        Float[] noiseErrHist = this.noiseErrDistTable.get(part);
         return (float) Math.log(ionErrHist[errIndex] / noiseErrHist[errIndex]);
     }
 
+    Float[] getIonErrDist(Partition part) {
+        return this.ionErrDistTable.get(part);
+    }
+
+    Float[] getNoiseErrDist(Partition part) {
+        return this.noiseErrDistTable.get(part);
+    }
+
+    Float[] getIonExistenceProb(Partition part) {
+        return this.ionExistenceTable.get(part);
+    }
+
     public float getIonExistenceScore(Partition part, int index, float probPeak) {
-        Float[] ionExistenceProb = this.ionExistenceTable.get(part);
+        return getIonExistenceScore(this.ionExistenceTable.get(part), index, probPeak);
+    }
+
+    /**
+     * Ion existence score from the ion existence probabilities of a partition (see getIonExistenceProb),
+     * for callers that score many edges of the same partition
+     */
+    float getIonExistenceScore(Float[] ionExistenceProb, int index, float probPeak) {
         float noiseExistenceProb;
         if (index == 0)    // nn
             noiseExistenceProb = (1 - probPeak) * (1 - probPeak);
