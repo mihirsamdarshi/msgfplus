@@ -52,6 +52,11 @@ public class CompactFastaSequence implements Sequence {
     private HashMap<Byte, Character> byte2alpha;
 
     /**
+     * Reverse translation as a table indexed by byte value, '?' for bytes not in the alphabet; used by toChar
+     */
+    private char[] byte2char;
+
+    /**
      * String representation of the alphabet
      */
     private String alphabetString;
@@ -242,7 +247,7 @@ public class CompactFastaSequence implements Sequence {
     }
 
     public char toChar(byte b) {
-        if (byte2alpha.containsKey(b)) return byte2alpha.get(b);
+        if (b >= 0) return byte2char[b];
         return '?';
     }
 
@@ -397,6 +402,11 @@ public class CompactFastaSequence implements Sequence {
                 alpha2byte.put(tokens[i].charAt(j), value);
             }
             byte2alpha.put(value, tokens[i].charAt(0));
+        }
+        this.byte2char = new char[Byte.MAX_VALUE + 1];
+        for (int b = 0; b < byte2char.length; b++) {
+            Character c = byte2alpha.get((byte) b);
+            byte2char[b] = c != null ? c : Constants.INVALID_CHAR;
         }
     }
 
