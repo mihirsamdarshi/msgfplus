@@ -31,7 +31,7 @@ public class CandidatePeptideGrid {
      * Number of modifications for each length prm
      */
     private int[][] numMods;
-    private StringBuffer[] peptide;
+    private char[][] peptide;    // residues 1..length of each variant; the String is built in getPeptideSeq
 
     // caching amino acid set for fast search
 
@@ -83,7 +83,7 @@ public class CandidatePeptideGrid {
         nominalPRM = new int[maxNumVariantsPerPeptide][maxPeptideLength + 1];
         prm = new double[maxNumVariantsPerPeptide][maxPeptideLength + 1];
         numMods = new int[maxNumVariantsPerPeptide][maxPeptideLength + 1];
-        peptide = new StringBuffer[maxNumVariantsPerPeptide];
+        peptide = new char[maxNumVariantsPerPeptide][maxPeptideLength + 1];
         size = new int[maxPeptideLength + 1];
         nMissedCleavages = new int[maxPeptideLength + 1];
         residues = new char[maxPeptideLength + 1];
@@ -96,7 +96,6 @@ public class CandidatePeptideGrid {
             nominalPRM[i][0] = 0;
             prm[i][0] = 0.;
             numMods[i][0] = 0;
-            peptide[i] = new StringBuffer();
         }
         size[0] = 1;
         nMissedCleavages[0] = 0;
@@ -125,7 +124,7 @@ public class CandidatePeptideGrid {
     }
 
     public String getPeptideSeq(int index) {
-        return peptide[index].toString();
+        return new String(peptide[index], 1, length);
     }
 
     /**
@@ -244,8 +243,7 @@ public class CandidatePeptideGrid {
             nominalPRM[parentIndex][length] = nominalPRM[parentIndex][length - 1] + aaNominalMassArr[0];
             prm[parentIndex][length] = prm[parentIndex][length - 1] + aaMassArr[0];
             numMods[parentIndex][length] = numMods[parentIndex][length - 1];
-            peptide[parentIndex].setLength(length - 1);
-            peptide[parentIndex].append(aaResidueArr[0]);
+            peptide[parentIndex][length] = aaResidueArr[0];
         }
         size[length] = parentSize;
 
@@ -259,12 +257,12 @@ public class CandidatePeptideGrid {
                         for (int k = 1; k < length; k++) {
                             nominalPRM[newIndex][k] = nominalPRM[parentIndex][k];
                             prm[newIndex][k] = prm[parentIndex][k];
+                            peptide[newIndex][k] = peptide[parentIndex][k];
                         }
-                        peptide[newIndex] = new StringBuffer(peptide[parentIndex].substring(0, length - 1));
                         nominalPRM[newIndex][length] = nominalPRM[newIndex][length - 1] + aaNominalMassArr[j];
                         prm[newIndex][length] = prm[newIndex][length - 1] + aaMassArr[j];
                         numMods[newIndex][length] = numModParent + 1;
-                        peptide[newIndex].append(aaResidueArr[j]);
+                        peptide[newIndex][length] = aaResidueArr[j];
                         newIndex++;
                         if (newIndex >= maxNumVariantsPerPeptide)
                             break;
