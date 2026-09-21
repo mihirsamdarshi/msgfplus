@@ -18,6 +18,11 @@ public class SpecKey extends Pair<Integer, Integer> {
         super(specIndex, charge);
     }
 
+    public SpecKey(int specIndex, int charge, float precursorMz) {
+        this(specIndex, charge);
+        this.precursorMz = precursorMz;
+    }
+
     public void setPrecursorMz(float precursorMz) {
         this.precursorMz = precursorMz;
     }
@@ -210,9 +215,9 @@ public class SpecKey extends Pair<Integer, Integer> {
 
             if (charge == 0) {
                 for (int c = minCharge; c <= maxCharge; c++)
-                    specKeyList.add(new SpecKey(specIndex, c));
+                    specKeyList.add(new SpecKey(specIndex, c, spec.getPrecursorPeak().getMz()));
             } else if (charge > 0) {
-                specKeyList.add(new SpecKey(specIndex, charge));
+                specKeyList.add(new SpecKey(specIndex, charge, spec.getPrecursorPeak().getMz()));
             }
         }
 
@@ -259,13 +264,13 @@ public class SpecKey extends Pair<Integer, Integer> {
             int charge = precursor.getCharge();
             if (charge == 0) {
                 for (int c = minCharge; c <= maxCharge; c++) {
-                    SpecKey specKey = new SpecKey(list.get(0), c);
+                    SpecKey specKey = new SpecKey(list.get(0), c, precursor.getMz());
                     for (int specIndex : list)
                         specKey.addSpecIndex(specIndex);
                     specKeyList.add(specKey);
                 }
             } else if (charge > 0) {
-                SpecKey specKey = new SpecKey(list.get(0), charge);
+                SpecKey specKey = new SpecKey(list.get(0), charge, precursor.getMz());
                 for (int specIndex : list)
                     specKey.addSpecIndex(specIndex);
                 specKeyList.add(specKey);
