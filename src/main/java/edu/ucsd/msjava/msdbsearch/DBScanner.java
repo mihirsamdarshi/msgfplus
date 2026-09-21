@@ -267,23 +267,62 @@ public class DBScanner {
         }
     }
 
+    // Relative cost of a suffix dbSearch skips because its preceding residue is not a cleavage site, used to balance suffix ranges
+    private static final double SKIPPED_SUFFIX_WEIGHT = 0.01;
+
     /**
-     * Split the suffix array into numRanges ranges of similar size.
+     * Split the suffix array into numRanges ranges of similar search cost.
      * Every range starts at a suffix that shares at most minPeptideLength residues with the suffix before it,
      * so no peptide is shared across a boundary and searching the ranges separately visits exactly the peptides
      * a search of the whole array visits.
      *
      * @return numRanges+1 boundaries; range i is [boundaries[i], boundaries[i+1])
      */
-    public int[] getSuffixRangeBoundaries(int numRanges) throws IOException {
+    public int[] getSuffixRangeBoundaries(int numRanges, int numberOfAllowableNonEnzymaticTermini) throws IOException {
+        // The array is sorted, so the suffixes starting with a given byte (the residue preceding a candidate peptide)
+        // form one block per byte value, in byte order. With a C-terminal enzyme and no non-enzymatic terminus allowed,
+        // dbSearch skips every suffix whose preceding residue is neither a cleavage site nor a protein terminus,
+        // so those blocks carry almost no work.
+        CompactFastaSequence sequence = sa.getSequence();
+        long[] blockSize = new long[Byte.MAX_VALUE + 1];
+        for (long i = 0; i < size; i++)
+            blockSize[sequence.getByteAt(i)]++;
+
+        // Weight of a block: its number of suffixes, scaled down for the blocks dbSearch skips
+        boolean skipNonCleavableBlocks = enzyme != null && enzyme.isCTerm() && numberOfAllowableNonEnzymaticTermini == 0;
+        double[] blockWeight = new double[blockSize.length];
+        double totalWeight = 0;
+        for (int b = 0; b < blockSize.length; b++) {
+            if (blockSize[b] == 0)
+                continue;
+            blockWeight[b] = blockSize[b];
+            if (skipNonCleavableBlocks) {
+                char precedingAA = sequence.toChar((byte) b);
+                if (precedingAA != Constants.TERMINATOR_CHAR && !enzyme.isCleavable(precedingAA))
+                    blockWeight[b] *= SKIPPED_SUFFIX_WEIGHT;
+            }
+            totalWeight += blockWeight[b];
+        }
+
         int[] boundaries = new int[numRanges + 1];
         boundaries[numRanges] = size;
         try (DataInputStream nlcps = new DataInputStream(new BufferedInputStream(new FileInputStream(sa.getNeighboringLcpFile())))) {
             // skip size and id
             skipFully(nlcps, CompactSuffixArray.INT_BYTE_SIZE * 2);
             int position = 0;    // the next suffix whose neighboring LCP will be read from the file
+            int block = 0;
+            long blockStart = 0;
+            double weightBeforeBlock = 0;
             for (int i = 1; i < numRanges; i++) {
-                int target = (int) ((long) size * i / numRanges);
+                // Range i should start where the cumulative weight reaches i/numRanges of the total: find the block that
+                // point falls in, then interpolate within it as if its suffixes cost the same
+                double targetWeight = totalWeight * i / numRanges;
+                while (block < blockSize.length - 1 && weightBeforeBlock + blockWeight[block] < targetWeight) {
+                    weightBeforeBlock += blockWeight[block];
+                    blockStart += blockSize[block];
+                    block++;
+                }
+                int target = (int) (blockStart + (targetWeight - weightBeforeBlock) / blockWeight[block] * blockSize[block]);
                 if (target < position)
                     target = position;
                 skipFully(nlcps, target - position);
