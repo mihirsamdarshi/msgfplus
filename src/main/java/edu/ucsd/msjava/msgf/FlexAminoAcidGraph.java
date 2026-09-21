@@ -105,12 +105,17 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         return new NominalMass(pmNode.getNominalMass() - node.getNominalMass());
     }
 
-    // the index of a node in edgeMap and nodeScore, or -1 for a mass that cannot be a node of this graph
-    private int getNodeIndex(NominalMass node) {
+    @Override
+    public int getNodeIndex(NominalMass node) {
         int index = node.getNominalMass() + nodeIndexOffset;
         if (index < 0 || index >= edgeMap.length)
             return -1;
         return index;
+    }
+
+    @Override
+    public int getNumNodeIndices() {
+        return edgeMap.length;
     }
 
     @Override

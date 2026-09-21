@@ -6,12 +6,14 @@ import edu.ucsd.msjava.msutil.Matter;
 import edu.ucsd.msjava.msutil.Peptide;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 
 public abstract class DeNovoGraph<T extends Matter> {
     protected T source;
     protected T pmNode;
     protected ArrayList<T> sinkNodes;
     protected ArrayList<T> intermediateNodes;
+    private HashMap<T, Integer> nodeIndexMap;
 
     public T getSource() {
         return source;
@@ -27,6 +29,36 @@ public abstract class DeNovoGraph<T extends Matter> {
 
     public ArrayList<T> getIntermediateNodeList() {
         return intermediateNodes;
+    }
+
+    /**
+     * A dense index of the graph's nodes, for tables indexed by node instead of keyed by node: an index in
+     * 0..getNumNodeIndices()-1 for every node of the graph, or -1 for a node that cannot be in it. An index may
+     * belong to no node (FlexAminoAcidGraph indexes by nominal mass, and not every mass is a node), so a table
+     * indexed this way must allow for empty entries.
+     */
+    public int getNodeIndex(T node) {
+        Integer index = getNodeIndexMap().get(node);
+        return index == null ? -1 : index;
+    }
+
+    public int getNumNodeIndices() {
+        return getNodeIndexMap().size();
+    }
+
+    private HashMap<T, Integer> getNodeIndexMap() {
+        if (nodeIndexMap == null) {
+            HashMap<T, Integer> map = new HashMap<T, Integer>();
+            map.put(source, map.size());
+            for (T n : intermediateNodes)
+                if (!map.containsKey(n))
+                    map.put(n, map.size());
+            for (T n : sinkNodes)
+                if (!map.containsKey(n))
+                    map.put(n, map.size());
+            nodeIndexMap = map;
+        }
+        return nodeIndexMap;
     }
 
     public abstract boolean isReverse();
