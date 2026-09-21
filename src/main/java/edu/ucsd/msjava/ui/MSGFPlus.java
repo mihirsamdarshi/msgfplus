@@ -460,7 +460,7 @@ public class MSGFPlus {
                 long startTimeDbSearch = System.currentTimeMillis();
                 output.println("Database search...");
                 if (suffixBoundaries == null)
-                    suffixBoundaries = scanner.getSuffixRangeBoundaries(maxTasksPerBatch * rangesPerTask);
+                    suffixBoundaries = scanner.getSuffixRangeBoundaries(maxTasksPerBatch * rangesPerTask, nnet);
                 tasks = new ArrayList<Runnable>();
                 for (int i = 0; i < suffixBoundaries.length - 1; i++)
                     if (suffixBoundaries[i] < suffixBoundaries[i + 1])

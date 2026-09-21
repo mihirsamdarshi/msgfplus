@@ -110,7 +110,7 @@ public class SuffixRangeSearchTest {
 
     private static String searchRanges(Enzyme enzyme, final int nnet, int numPeptidesPerSpec, int numRanges) throws Exception {
         final DBScanner scanner = newScanner(enzyme, numPeptidesPerSpec);
-        final int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges);
+        final int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges, nnet);
         assertEquals(0, boundaries[0]);
         assertEquals(sa.getSize(), boundaries[numRanges]);
         scanner.startRangeSearch(numRanges, 8);
@@ -175,7 +175,7 @@ public class SuffixRangeSearchTest {
 
         DBScanner scanner = newScanner(Enzyme.TRYPSIN, 3);
         int numRanges = 4;
-        int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges);
+        int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges, 0);
         scanner.startRangeSearch(numRanges, 2);
 
         // nothing is merged yet, so ranges 0 and 1 may run and range 2 has to wait
@@ -198,7 +198,7 @@ public class SuffixRangeSearchTest {
     public void mergeFailsWhenARangeWasInterrupted() throws Exception {
         DBScanner scanner = newScanner(Enzyme.TRYPSIN, 3);
         int numRanges = 2;
-        int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges);
+        int[] boundaries = scanner.getSuffixRangeBoundaries(numRanges, 0);
         scanner.startRangeSearch(numRanges, 1);
 
         Thread range1 = startRange(scanner, boundaries, 1);
