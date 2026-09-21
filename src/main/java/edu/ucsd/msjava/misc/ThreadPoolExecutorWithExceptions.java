@@ -90,7 +90,11 @@ public class ThreadPoolExecutorWithExceptions extends ThreadPoolExecutor {
         }
         if (t == null) {
             // Output the progress report right after exiting this function, but just once.
-            statusExecutor.schedule(progressReportRunnable, 10, TimeUnit.NANOSECONDS);
+            try {
+                statusExecutor.schedule(progressReportRunnable, 10, TimeUnit.NANOSECONDS);
+            } catch (RejectedExecutionException e) {
+                // awaitTermination was interrupted and has shut the reporting down; this task finished afterwards
+            }
         }
     }
 

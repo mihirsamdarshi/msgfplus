@@ -2,13 +2,44 @@ package edu.ucsd.msjava.msdbsearch;
 
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.misc.ProgressReporter;
+import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
 
 import java.io.PrintStream;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.io.output.NullOutputStream;
 
 public class ConcurrentMSGFPlus {
+    /**
+     * Run the tasks on a pool of numThreads threads and wait for all of them; rethrows the first exception a task threw.
+     */
+    public static void runTasks(String taskName, List<Runnable> tasks, int numThreads) throws Throwable {
+        ThreadPoolExecutorWithExceptions executor = ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
+        executor.setTaskName(taskName);
+        try {
+            for (Runnable task : tasks)
+                executor.execute(task);
+            // Output initial progress report.
+            executor.outputProgressReport();
+            executor.shutdown();
+            executor.awaitTerminationWithExceptions(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+            // Output completed progress report.
+            executor.outputProgressReport();
+        } catch (Throwable e) {
+            // A task that failed while tasks were still being submitted makes execute throw; report the task's failure
+            Throwable cause = executor.HasThrownData() ? executor.getThrownData() : e;
+            // Stop the tasks still running (after a task failed, or this thread was interrupted) and the progress reporting
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(1, TimeUnit.MINUTES);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+            throw cause;
+        }
+    }
+
     public static class RunMSGFPlus implements Runnable, ProgressReporter {
         private final ScoredSpectraMap specScanner;
         private final DBScanner scanner;
