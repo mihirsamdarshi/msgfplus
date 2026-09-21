@@ -4,8 +4,6 @@ import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
@@ -17,8 +15,10 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
     private boolean useProtNTerm;
     private boolean useProtCTerm;
 
-    private HashMap<NominalMass, ArrayList<DeNovoGraph.Edge<NominalMass>>> edgeMap;
-    private HashMap<NominalMass, Integer> nodeScore;
+    // indexed by nominal mass + nodeIndexOffset (nodes can have negative mass with negative modifications)
+    private int nodeIndexOffset;
+    private ArrayList<DeNovoGraph.Edge<NominalMass>>[] edgeMap;
+    private int[] nodeScore;
 
     private static AtomicInteger negativeCompNodeMassWarnCount;
     private static AtomicInteger negativeNodeMassWarnCount;
@@ -70,12 +70,28 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
             exceptionCountGetNodeScore = new AtomicInteger();
         }
 
-        edgeMap = new HashMap<NominalMass, ArrayList<DeNovoGraph.Edge<NominalMass>>>();
-        edgeMap.put(source, new ArrayList<DeNovoGraph.Edge<NominalMass>>());
+        int minAANominalMass = 0;
+        for (Location location : Location.values()) {
+            ArrayList<AminoAcid> aaList = aaSet.getAAList(location);
+            if (aaList == null)
+                continue;
+            for (AminoAcid aa : aaList)
+                if (aa.getNominalMass() < minAANominalMass)
+                    minAANominalMass = aa.getNominalMass();
+        }
+        // A wide precursor tolerance can put the sink below zero; the arrays must still include both it and the source.
+        nodeIndexOffset = -Math.min(minAANominalMass, peptideMass);
+        int numNodeIndices = Math.max(peptideMass, 0) + nodeIndexOffset + 1;
+        @SuppressWarnings("unchecked")
+        ArrayList<DeNovoGraph.Edge<NominalMass>>[] edges = new ArrayList[numNodeIndices];
+        edgeMap = edges;
+        edgeMap[getNodeIndex(source)] = new ArrayList<DeNovoGraph.Edge<NominalMass>>();
         setForwardEdgesFromSource();
         setForwardEdgesFromIntermediateNodes();
-        super.intermediateNodes = new ArrayList<NominalMass>(edgeMap.keySet());
-        Collections.sort(super.intermediateNodes);
+        super.intermediateNodes = new ArrayList<NominalMass>();
+        for (int i = 0; i < edgeMap.length; i++)    // in ascending mass order
+            if (edgeMap[i] != null)
+                super.intermediateNodes.add(new NominalMass(i - nodeIndexOffset));
         this.setBackwardEdgesFromSink();
 
         super.sinkNodes = new ArrayList<NominalMass>();
@@ -89,10 +105,20 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         return new NominalMass(pmNode.getNominalMass() - node.getNominalMass());
     }
 
+    // the index of a node in edgeMap and nodeScore, or -1 for a mass that cannot be a node of this graph
+    private int getNodeIndex(NominalMass node) {
+        int index = node.getNominalMass() + nodeIndexOffset;
+        if (index < 0 || index >= edgeMap.length)
+            return -1;
+        return index;
+    }
+
     @Override
     public ArrayList<DeNovoGraph.Edge<NominalMass>> getEdges(NominalMass curNode) {
-
-        return edgeMap.get(curNode);
+        int index = getNodeIndex(curNode);
+        if (index < 0)
+            return null;
+        return edgeMap[index];
     }
 
     @Override
@@ -107,7 +133,7 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         }
 
         try {
-            return nodeScore.get(node);
+            return nodeScore[getNodeIndex(node)];
         } catch (Exception ex) {
             int errorCount = exceptionCountGetNodeScore.addAndGet(1);
             if (notifyError(errorCount)) {
@@ -190,8 +216,8 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
     }
 
     private void computeNodeScores() {
-        nodeScore = new HashMap<NominalMass, Integer>();
-        nodeScore.put(source, 0);
+        nodeScore = new int[edgeMap.length];
+        nodeScore[getNodeIndex(source)] = 0;
 
         boolean warnNegativeNodeMass = false;
         boolean warnNegativeCompNodeMass = false;
@@ -222,10 +248,10 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
                 score = scoredSpec.getNodeScore(compNode, node);
             else
                 score = scoredSpec.getNodeScore(node, compNode);
-            nodeScore.put(node, score);
+            nodeScore[getNodeIndex(node)] = score;
         }
         for (NominalMass node : this.sinkNodes)
-            nodeScore.put(node, 0);
+            nodeScore[getNodeIndex(node)] = 0;
     }
 
     private boolean notifyError(int errorCount) {
@@ -293,7 +319,7 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         ArrayList<DeNovoGraph.Edge<NominalMass>> edges = new ArrayList<DeNovoGraph.Edge<NominalMass>>();
         for (AminoAcid aa : aaList) {
             NominalMass prevNode = new NominalMass(peptideNominalMass - aa.getNominalMass());
-            if (edgeMap.containsKey(prevNode)) {
+            if (getEdges(prevNode) != null) {
                 DeNovoGraph.Edge<NominalMass> edge = new DeNovoGraph.Edge<NominalMass>(prevNode, aa.getProbability(), aaSet.getIndex(aa), aa.getMass());
                 edges.add(edge);
                 if (enzyme != null && direction != enzyme.isNTerm()) {
@@ -306,11 +332,11 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
                     edge.setErrorScore(MODIFIED_EDGE_PENALTY);
             }
         }
-        edgeMap.put(pmNode, edges);
+        edgeMap[getNodeIndex(pmNode)] = edges;
     }
 
     private void makeForwardEdges(NominalMass curNode, ArrayList<AminoAcid> aaList, int[] aaIndices, boolean addCleavageScore) {
-        if (edgeMap.get(curNode) == null)
+        if (getEdges(curNode) == null)
             return;
         int curNominalMass = curNode.getNominalMass();
         for (int aaIndex = 0; aaIndex < aaList.size(); aaIndex++) {
@@ -319,10 +345,11 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
             if (nextNodeNominalMass >= pmNode.getNominalMass())
                 continue;
             NominalMass nextNode = new NominalMass(nextNodeNominalMass);
-            ArrayList<DeNovoGraph.Edge<NominalMass>> edges = edgeMap.get(nextNode);
+            int nextNodeIndex = getNodeIndex(nextNode);
+            ArrayList<DeNovoGraph.Edge<NominalMass>> edges = edgeMap[nextNodeIndex];
             if (edges == null) {
                 edges = new ArrayList<DeNovoGraph.Edge<NominalMass>>();
-                edgeMap.put(nextNode, edges);
+                edgeMap[nextNodeIndex] = edges;
             }
 
             DeNovoGraph.Edge<NominalMass> edge = new DeNovoGraph.Edge<NominalMass>(
