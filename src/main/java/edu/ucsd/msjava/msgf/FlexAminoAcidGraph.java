@@ -251,13 +251,21 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         }
 
         ArrayList<AminoAcid> aaList = aaSet.getAAList(location);
-        makeForwardEdges(source, aaList, enzyme != null && direction == enzyme.isNTerm());
+        makeForwardEdges(source, aaList, getAAIndices(aaList), enzyme != null && direction == enzyme.isNTerm());
     }
 
     private void setForwardEdgesFromIntermediateNodes() {
         ArrayList<AminoAcid> aaList = aaSet.getAAList(Location.Anywhere);
+        int[] aaIndices = getAAIndices(aaList);
         for (int i = 1; i < pmNode.getNominalMass(); i++)
-            makeForwardEdges(new NominalMass(i), aaList, false);
+            makeForwardEdges(new NominalMass(i), aaList, aaIndices, false);
+    }
+
+    private int[] getAAIndices(ArrayList<AminoAcid> aaList) {
+        int[] aaIndices = new int[aaList.size()];
+        for (int i = 0; i < aaIndices.length; i++)
+            aaIndices[i] = aaSet.getIndex(aaList.get(i));
+        return aaIndices;
     }
 
     private void setBackwardEdgesFromSink() {
@@ -301,11 +309,12 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         edgeMap.put(pmNode, edges);
     }
 
-    private void makeForwardEdges(NominalMass curNode, ArrayList<AminoAcid> aaList, boolean addCleavageScore) {
+    private void makeForwardEdges(NominalMass curNode, ArrayList<AminoAcid> aaList, int[] aaIndices, boolean addCleavageScore) {
         if (edgeMap.get(curNode) == null)
             return;
         int curNominalMass = curNode.getNominalMass();
-        for (AminoAcid aa : aaList) {
+        for (int aaIndex = 0; aaIndex < aaList.size(); aaIndex++) {
+            AminoAcid aa = aaList.get(aaIndex);
             int nextNodeNominalMass = curNominalMass + aa.getNominalMass();
             if (nextNodeNominalMass >= pmNode.getNominalMass())
                 continue;
@@ -319,7 +328,7 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
             DeNovoGraph.Edge<NominalMass> edge = new DeNovoGraph.Edge<NominalMass>(
                     curNode,
                     aa.getProbability(),
-                    aaSet.getIndex(aa),
+                    aaIndices[aaIndex],
                     aa.getMass());
 //			if(curNode.getNominalMass() == 57 && nextNode.getNominalMass() == 114)
 //				System.out.println("Debug");
