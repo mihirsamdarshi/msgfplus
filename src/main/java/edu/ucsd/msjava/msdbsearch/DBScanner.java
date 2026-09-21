@@ -139,6 +139,31 @@ public class DBScanner {
         }
     }
 
+    /**
+     * Add a match to a per-spectrum queue, keeping the best numPeptidesPerSpec scores and every match tied with the worst kept score.
+     * Matches scoring below the worst kept score are dropped.
+     */
+    private void addMatch(PriorityQueue<DatabaseMatch> matchQueue, DatabaseMatch match) {
+        int score = match.getScore();
+        if (matchQueue.size() < this.numPeptidesPerSpec || score == matchQueue.peek().getScore()) {
+            matchQueue.add(match);
+        } else {
+            int worstScore = matchQueue.peek().getScore();
+            if (score > worstScore) {
+                List<DatabaseMatch> removed = new ArrayList<DatabaseMatch>();
+                while (!matchQueue.isEmpty() && matchQueue.peek().getScore() == worstScore) {
+                    removed.add(matchQueue.poll());
+                }
+                matchQueue.add(match);
+
+                if (matchQueue.size() < this.numPeptidesPerSpec) {
+                    for (DatabaseMatch m : removed)
+                        matchQueue.add(m);
+                }
+            }
+        }
+    }
+
     private synchronized void copySpectrumMaps() {
         if (searchPepMassKeys == null) {
             SortedMap<Double, SpecKey> pepMassSpecKeyMap = specScanner.getPepMassSpecKeyMap();
@@ -578,33 +603,13 @@ public class DBScanner {
                                     curSpecKeyDBMatchMap.put(specKey, prevMatchQueue);
                                 }
 
-                                if (prevMatchQueue.size() < this.numPeptidesPerSpec || score == prevMatchQueue.peek().getScore()) {
+                                if (prevMatchQueue.size() < this.numPeptidesPerSpec || score >= prevMatchQueue.peek().getScore()) {
                                     DatabaseMatch dbMatch = new DatabaseMatch(index, (byte) (pepLength + 2), score, theoPeptideMass, nominalPeptideMass, specKey.getCharge(), candidatePepGrid.getPeptideSeq(j), scorer.getActivationMethodArr()).setProteinNTerm(isProteinNTerm).setProteinCTerm(isProteinCTerm);
                                     dbMatch.setNTermMetCleaved(isNTermMetCleaved);
-                                    prevMatchQueue.add(dbMatch);
+                                    addMatch(prevMatchQueue, dbMatch);
                                     if (prevMatchList[peptideLengthIndex] == null)
                                         prevMatchList[peptideLengthIndex] = new MatchList();
                                     prevMatchList[peptideLengthIndex].add(dbMatch);
-                                } else if (prevMatchQueue.size() >= this.numPeptidesPerSpec) {
-                                    int worstScore = prevMatchQueue.peek().getScore();
-                                    if (score > worstScore) {
-                                        List<DatabaseMatch> removed = new ArrayList<DatabaseMatch>();
-                                        while (!prevMatchQueue.isEmpty() && prevMatchQueue.peek().getScore() == worstScore) {
-                                            removed.add(prevMatchQueue.poll());
-                                        }
-                                        DatabaseMatch dbMatch = new DatabaseMatch(index, (byte) (pepLength + 2), score, theoPeptideMass, nominalPeptideMass, specKey.getCharge(), candidatePepGrid.getPeptideSeq(j), scorer.getActivationMethodArr()).setProteinNTerm(isProteinNTerm).setProteinCTerm(isProteinCTerm);
-                                        dbMatch.setNTermMetCleaved(isNTermMetCleaved);
-                                        prevMatchQueue.add(dbMatch);
-
-                                        if (prevMatchQueue.size() < this.numPeptidesPerSpec) {
-                                            for (DatabaseMatch m : removed)
-                                                prevMatchQueue.add(m);
-                                        }
-
-                                        if (prevMatchList[peptideLengthIndex] == null)
-                                            prevMatchList[peptideLengthIndex] = new MatchList();
-                                        prevMatchList[peptideLengthIndex].add(dbMatch);
-                                    }
                                 }
                             }
                         }
