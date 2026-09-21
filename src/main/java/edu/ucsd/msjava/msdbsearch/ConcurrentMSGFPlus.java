@@ -12,6 +12,30 @@ import org.apache.commons.io.output.NullOutputStream;
 
 public class ConcurrentMSGFPlus {
     /**
+     * Search one suffix range of the database against every spectrum of a shared scanner.
+     */
+    public static class SearchDBRange implements Runnable {
+        private final DBScanner scanner;
+        private final int numberOfAllowableNonEnzymaticTermini;
+        private final int fromIndex;
+        private final int toIndex;
+        private final int rangeIndex;
+
+        public SearchDBRange(DBScanner scanner, int numberOfAllowableNonEnzymaticTermini, int fromIndex, int toIndex, int rangeIndex) {
+            this.scanner = scanner;
+            this.numberOfAllowableNonEnzymaticTermini = numberOfAllowableNonEnzymaticTermini;
+            this.fromIndex = fromIndex;
+            this.toIndex = toIndex;
+            this.rangeIndex = rangeIndex;
+        }
+
+        @Override
+        public void run() {
+            scanner.dbSearch(numberOfAllowableNonEnzymaticTermini, fromIndex, toIndex, true, rangeIndex);
+        }
+    }
+
+    /**
      * Run the tasks on a pool of numThreads threads and wait for all of them; rethrows the first exception a task threw.
      */
     public static void runTasks(String taskName, List<Runnable> tasks, int numThreads) throws Throwable {

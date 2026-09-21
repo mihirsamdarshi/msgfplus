@@ -1,8 +1,8 @@
 package edu.ucsd.msjava.ui;
 
 import edu.ucsd.msjava.fdr.ComputeFDR;
-import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
 import edu.ucsd.msjava.msdbsearch.*;
+import edu.ucsd.msjava.msgf.NominalMass;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
@@ -12,13 +12,15 @@ import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
 
 import java.io.File;
+import java.io.PrintStream;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import org.apache.commons.io.output.NullOutputStream;
 
 
 public class MSGFPlus {
@@ -30,6 +32,47 @@ public class MSGFPlus {
 
     // Set this to true when debugging
     private static final boolean DISABLE_THREADING = false;
+
+    // Reserve up to 256 MiB for database metadata and other overhead, without consuming a small heap outright.
+    // Half of what remains is kept for the matches and the E-value pass.
+    static long getScorerMemory(long maxMemory, long databaseSize) {
+        long overhead = Math.min(1L << 28, maxMemory / 4);
+        return Math.max(0, (maxMemory - databaseSize - overhead) / 2);
+    }
+
+    /**
+     * @return the end (exclusive) of the batch of spectra that starts at fromIndex: the keys whose scorers fit in
+     * scorerMemory (at least one key, at most maxSpecKeysPerBatch), plus the remaining charge states of the last spectrum
+     */
+    static int getBatchEndIndex(List<SpecKey> specKeyList, int fromIndex, int maxSpecKeysPerBatch, long scorerMemory, Tolerance leftPrecursorMassTolerance, int minIsotopeError) {
+        int specSize = specKeyList.size();
+        int numBytesPerMass = 12;
+        int toIndex = fromIndex;
+        long batchScorerMemory = 0;
+        while (toIndex < specSize && toIndex - fromIndex < maxSpecKeysPerBatch) {
+            SpecKey specKey = specKeyList.get(toIndex);
+            // the scorer's size, as in ScoredSpectraMap.preProcessIndividualSpectra
+            float peptideMass = (specKey.getPrecursorMz() - (float) Composition.ChargeCarrierMass()) * specKey.getCharge() - (float) Composition.H2O;
+            int maxNominalPeptideMass = NominalMass.toNominalMass(peptideMass) + Math.round(leftPrecursorMassTolerance.getToleranceAsDa(peptideMass) - 0.4999f) - minIsotopeError;
+            batchScorerMemory += (long) numBytesPerMass * Math.max(maxNominalPeptideMass, 0) + 1024;
+            if (batchScorerMemory > scorerMemory && toIndex > fromIndex)
+                break;
+            toIndex++;
+        }
+        // keep all charge states of a spectrum in the same batch
+        while (toIndex < specSize && specKeyList.get(toIndex - 1).getSpecIndex() == specKeyList.get(toIndex).getSpecIndex())
+            toIndex++;
+        return toIndex;
+    }
+
+    private static void runTasks(String taskName, List<Runnable> tasks, int numThreads) throws Throwable {
+        if (DISABLE_THREADING) {
+            for (Runnable task : tasks)
+                task.run();
+        } else {
+            ConcurrentMSGFPlus.runTasks(taskName, tasks, numThreads);
+        }
+    }
 
     public static void main(String argv[]) {
         long startTime = System.currentTimeMillis();
@@ -303,23 +346,6 @@ public class MSGFPlus {
 
         List<MSGFPlusMatch> resultList = Collections.synchronizedList(new ArrayList<MSGFPlusMatch>());
 
-        int toIndexGlobal = specSize;
-        while (toIndexGlobal < specSize) {
-            SpecKey lastSpecKey = specKeyList.get(toIndexGlobal - 1);
-            SpecKey nextSpecKey = specKeyList.get(toIndexGlobal);
-
-            if (lastSpecKey.getSpecIndex() == nextSpecKey.getSpecIndex())
-                toIndexGlobal++;
-            else
-                break;
-        }
-
-        System.out.println("Spectrum 0-" + (toIndexGlobal - 1) + " (total: " + specSize + ")");
-
-        // Thread pool
-        ThreadPoolExecutorWithExceptions executor = ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
-        executor.setTaskName("Search");
-
         int numTasks = Math.min(numThreads * 3, Math.round((float) specSize / spectraPerTaskMinimum));
         if (numThreads <= 1) {
             numTasks = 1;
@@ -341,36 +367,44 @@ public class MSGFPlus {
             System.out.println("Searching using a single task.");
         }
 
-        // Partition specKeyList
-        int size = toIndexGlobal;
-        int residue = size % numTasks;
+        // The database is walked once per batch of spectra, split into suffix ranges that run on numThreads threads.
+        // All spectra of a batch are scored at once, so the batch is limited by the heap: a spectrum's scorer holds
+        // three float arrays over its nominal peptide mass (see ScoredSpectraMap.preProcessIndividualSpectra), and
+        // half of the heap left after the database is kept for the matches and the E-value pass.
+        // An explicit -tasks setting also caps a batch at numThreads/numTasks of the spectra, the share that was
+        // resident when every task held its own spectra.
+        long scorerMemory = getScorerMemory(Runtime.getRuntime().maxMemory(), sa.getSize());
+        int maxSpecKeysPerBatch = specSize;
+        if (params.getNumTasks() != 0)
+            maxSpecKeysPerBatch = Math.max(1, (int) ((long) specSize * numThreads / numTasks));
+        // -tasks can reduce the batch size, but must not multiply the parallel work within each batch as well.
+        int maxTasksPerBatch = Math.min(numTasks, numThreads * 3);
+        int rangesPerTask = 4;
+        int[] suffixBoundaries = null;
 
-        int[] startIndex = new int[numTasks];
-        int[] endIndex = new int[numTasks];
-
-        int subListSize = size / numTasks;
-        for (int i = 0; i < numTasks; i++) {
-            startIndex[i] = i > 0 ? endIndex[i - 1] : 0;
-            endIndex[i] = startIndex[i] + subListSize + (i < residue ? 1 : 0);
-
-            subListSize = size / numTasks;
-            while (endIndex[i] < specKeyList.size()) {
-                SpecKey lastSpecKey = specKeyList.get(endIndex[i] - 1);
-                SpecKey nextSpecKey = specKeyList.get(endIndex[i]);
-
-                if (lastSpecKey.getSpecIndex() == nextSpecKey.getSpecIndex()) {
-                    ++endIndex[i];
-                    --subListSize;
-                } else
-                    break;
-            }
+        PrintStream output;
+        if (params.getVerbose()) {
+            output = System.out;
+        } else {
+            output = new PrintStream(new NullOutputStream());
         }
 
+        int ntt = params.getNumTolerableTermini();
+        if (params.getEnzyme() == null)
+            ntt = 0;
+        int nnet = 2 - ntt;
+
         try {
-            for (int i = 0; i < numTasks; i++) {
+            int fromIndexGlobal = 0;
+            while (fromIndexGlobal < specSize) {
+                int toIndexGlobal = getBatchEndIndex(specKeyList, fromIndexGlobal, maxSpecKeysPerBatch, scorerMemory, leftPrecursorMassTolerance, minIsotopeError);
+
+                System.out.println("Spectrum " + fromIndexGlobal + "-" + (toIndexGlobal - 1) + " (total: " + specSize + ")");
+
+                List<SpecKey> batchSpecKeyList = Collections.synchronizedList(specKeyList.subList(fromIndexGlobal, toIndexGlobal));
                 ScoredSpectraMap specScanner = new ScoredSpectraMap(
                         specAcc,
-                        Collections.synchronizedList(specKeyList.subList(startIndex[i], endIndex[i])),
+                        batchSpecKeyList,
                         leftPrecursorMassTolerance,
                         rightPrecursorMassTolerance,
                         minIsotopeError,
@@ -382,55 +416,92 @@ public class MSGFPlus {
                 if (doNotUseEdgeScore)
                     specScanner.turnOffEdgeScoring();
 
-                ConcurrentMSGFPlus.RunMSGFPlus msgfplusExecutor = new ConcurrentMSGFPlus.RunMSGFPlus(
+                DBScanner scanner = new DBScanner(
                         specScanner,
                         sa,
-                        params,
-                        resultList,
-                        i + 1
+                        params.getEnzyme(),
+                        params.getAASet(),
+                        params.getNumMatchesPerSpec(),
+                        params.getMinPeptideLength(),
+                        params.getMaxPeptideLength(),
+                        params.getMaxNumVariantsPerPeptide(),
+                        params.getMinDeNovoScore(),
+                        params.ignoreMetCleavage(),
+                        params.getMaxMissedCleavages()
                 );
+                scanner.setPrintStream(output);
 
-                if (DISABLE_THREADING) {
-                    msgfplusExecutor.run();
-                } else {
-                    executor.execute(msgfplusExecutor);
+                // Partition the batch into at most maxTasksPerBatch sub-lists, keeping a spectrum's charge states together
+                int size = toIndexGlobal - fromIndexGlobal;
+                int numBatchTasks = Math.min(maxTasksPerBatch, size);
+                int[] specBoundaries = new int[numBatchTasks + 1];
+                for (int i = 1; i < numBatchTasks; i++) {
+                    int boundary = Math.max(specBoundaries[i - 1], (int) ((long) size * i / numBatchTasks));
+                    while (boundary < size && boundary > 0 && batchSpecKeyList.get(boundary - 1).getSpecIndex() == batchSpecKeyList.get(boundary).getSpecIndex())
+                        boundary++;
+                    specBoundaries[i] = boundary;
                 }
+                specBoundaries[numBatchTasks] = size;
 
+                // Pre-process spectra
+                long startTimePreprocess = System.currentTimeMillis();
+                specScanner.makePepMassSpecKeyMap();
+                output.println("Preprocessing spectra...");
+                List<Runnable> tasks = new ArrayList<Runnable>();
+                for (int i = 0; i < numBatchTasks; i++)
+                    if (specBoundaries[i] < specBoundaries[i + 1])
+                        tasks.add(new ConcurrentMSGFDB.PreProcessSpectra(specScanner, specBoundaries[i], specBoundaries[i + 1]));
+                runTasks("Preprocessing", tasks, numThreads);
+                output.print("Preprocessing spectra finished ");
+                output.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - startTimePreprocess) / 1000);
+
+                // DB search by suffix range. The cost of a range is not known in advance (it depends on how many
+                // candidates fall in the spectrum mass windows), so there are several ranges per task and the pool balances them
+                long startTimeDbSearch = System.currentTimeMillis();
+                output.println("Database search...");
+                if (suffixBoundaries == null)
+                    suffixBoundaries = scanner.getSuffixRangeBoundaries(maxTasksPerBatch * rangesPerTask);
+                tasks = new ArrayList<Runnable>();
+                for (int i = 0; i < suffixBoundaries.length - 1; i++)
+                    if (suffixBoundaries[i] < suffixBoundaries[i + 1])
+                        tasks.add(new ConcurrentMSGFPlus.SearchDBRange(scanner, nnet, suffixBoundaries[i], suffixBoundaries[i + 1], tasks.size()));
+                scanner.startRangeSearch(tasks.size(), 2 * numThreads);
+                runTasks("Search", tasks, numThreads);
+                scanner.mergeRangeDBMatches();
+                output.print("Database search finished ");
+                output.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - startTimeDbSearch) / 1000);
+
+                // Spectral E-values
+                long startTimeComputeEvalue = System.currentTimeMillis();
+                output.println("Computing spectral E-values...");
+                tasks = new ArrayList<Runnable>();
+                for (int i = 0; i < numBatchTasks; i++)
+                    if (specBoundaries[i] < specBoundaries[i + 1])
+                        tasks.add(new ConcurrentMSGFDB.ComputeSpecProb(scanner, false, specBoundaries[i], specBoundaries[i + 1]));
+                runTasks("E-value", tasks, numThreads);
+                output.print("Computing spectral E-values finished ");
+                output.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - startTimeComputeEvalue) / 1000);
+
+                scanner.generateSpecIndexDBMatchMap();
+
+                if (params.outputAdditionalFeatures())
+                    scanner.addAdditionalFeatures();
+
+                scanner.addResultsToList(resultList);
+
+                fromIndexGlobal = toIndexGlobal;
             }
-            // Output initial progress report.
-            executor.outputProgressReport();
-
-            executor.shutdown();
-
-            try {
-                executor.awaitTerminationWithExceptions(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
-            } catch (InterruptedException e) {
-                if (!executor.HasThrownData()) {
-                    e.printStackTrace();
-                    Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, e.getMessage(), e);
-                }
-            }
-
-            // Output completed progress report.
-            executor.outputProgressReport();
-
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
-            int taskMult = numTasks / numThreads;
-            return "Task terminated; results incomplete. Please run again with a greater amount of memory, using \"-Xmx4G\", for example.\n" +
-                    "\tYou can also use less memory by increasing the number of tasks used for the search, at the cost of more time.\n" +
-                    "\tTry doubling the number used for this search with \"-tasks -" + (taskMult * 2) + "\" or \"-tasks " + (numTasks * 2) + "\".";
+            return "Task terminated; results incomplete. Please run again with a greater amount of memory, using \"-Xmx4G\", for example.";
         } catch (Exception ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
             return "Task terminated; results incomplete. Please run again.";
         } catch (Throwable ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
             return "Task terminated; results incomplete. Please run again.";
         }
 
