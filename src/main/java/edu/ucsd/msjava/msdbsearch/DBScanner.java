@@ -45,6 +45,11 @@ public class DBScanner {
     private Map<SpecKey, PriorityQueue<DatabaseMatch>> specKeyDBMatchMap;
     private Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap;
 
+    // The peptide mass map of the spectra, copied into sorted arrays so that a mass window is found by binary search
+    // (the masses are positive and never NaN, so primitive comparison orders them as Double.compareTo did).
+    private double[] searchPepMassKeys;
+    private List<SpecKey> searchPepMassSpecKeyList;
+
     private ProgressData progress;
     private PrintStream output;
 
@@ -134,6 +139,40 @@ public class DBScanner {
         }
     }
 
+    private synchronized void copySpectrumMaps() {
+        if (searchPepMassKeys == null) {
+            SortedMap<Double, SpecKey> pepMassSpecKeyMap = specScanner.getPepMassSpecKeyMap();
+            synchronized (pepMassSpecKeyMap) {
+                double[] keys = new double[pepMassSpecKeyMap.size()];
+                SpecKey[] specKeys = new SpecKey[keys.length];
+                int i = 0;
+                for (Entry<Double, SpecKey> entry : pepMassSpecKeyMap.entrySet()) {
+                    keys[i] = entry.getKey();
+                    specKeys[i] = entry.getValue();
+                    i++;
+                }
+                searchPepMassSpecKeyList = Arrays.asList(specKeys);
+                searchPepMassKeys = keys;
+            }
+        }
+    }
+
+    /**
+     * @return the index of the first key that is not less than mass, or keys.length if there is none
+     */
+    private static int firstKeyNotLessThan(double[] keys, double mass) {
+        int low = 0;
+        int high = keys.length;
+        while (low < high) {
+            int mid = (low + high) >>> 1;
+            if (keys[mid] < mass)
+                low = mid + 1;
+            else
+                high = mid;
+        }
+        return low;
+    }
+
     public Map<SpecKey, PriorityQueue<DatabaseMatch>> getSpecKeyDBMatchMap() {
         return specKeyDBMatchMap;
     }
@@ -206,6 +245,10 @@ public class DBScanner {
         int peptideCleavagePenalty = aaSet.getPeptideCleavagePenalty();
 
         boolean containsCTermMod = aaSet.containsCTermModification();
+
+        copySpectrumMaps();
+        double[] pepMassKeys = this.searchPepMassKeys;
+        List<SpecKey> pepMassSpecKeyList = this.searchPepMassSpecKeyList;
 
         try {
             DataInputStream indices = new DataInputStream(new BufferedInputStream(new FileInputStream(sa.getIndexFile())));
@@ -499,7 +542,7 @@ public class DBScanner {
                             continue;
                         }
 
-                        Collection<SpecKey> matchedSpecKeyList = specScanner.getPepMassSpecKeyMap().subMap(leftThr, rightThr).values();
+                        Collection<SpecKey> matchedSpecKeyList = pepMassSpecKeyList.subList(firstKeyNotLessThan(pepMassKeys, leftThr), firstKeyNotLessThan(pepMassKeys, rightThr));
                         if (matchedSpecKeyList.size() > 0) {
                             //////
 //							System.out.println("\tMatch: " + sequence.getCharAt(index)+"."+sequence.getSubsequence(index+1, index+i+1)+"."+sequence.getCharAt(index+i+1));
