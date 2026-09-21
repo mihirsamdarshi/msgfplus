@@ -394,8 +394,8 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
         }
 
         // determine minScore and maxScore
-        ArrayList<DeNovoGraph.Edge<T>> edges = new ArrayList<DeNovoGraph.Edge<T>>(); // modified by kyowon
-        for (DeNovoGraph.Edge<T> edge : graph.getEdges(curNode)) {
+        ArrayList<DeNovoGraph.Edge<T>> edges = graph.getEdges(curNode); // modified by kyowon
+        for (DeNovoGraph.Edge<T> edge : edges) {
             T prevNode = edge.getPrevNode();
             ScoreDist prevDist = fwdTable.get(prevNode);
             if (prevDist != null) {
@@ -407,7 +407,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
                     if (prevDist.getMinScore() + combinedScore < curMinScore)
                         curMinScore = prevDist.getMinScore() + combinedScore;
                 }
-                edges.add(edge);
             }
         }
         if (curMinScore >= curMaxScore)
