@@ -2,11 +2,15 @@ package edu.ucsd.msjava.msgf;
 
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.params.ParamManager;
+import edu.ucsd.msjava.ui.MSGFPlus;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.HashMap;
 
@@ -18,6 +22,9 @@ import static org.junit.Assert.*;
  * and every probability and count of the score distribution.
  */
 public class GeneratingFunctionTest {
+
+    @Rule
+    public TemporaryFolder temporaryFolder = new TemporaryFolder();
 
     // Deterministic node and edge scores, negative and positive
     private static class TestSpectrum implements ScoredSpectrum<NominalMass> {
@@ -72,9 +79,13 @@ public class GeneratingFunctionTest {
     // Both ion directions, three peptide masses, a table capacity that evicts at every node, one that evicts at some
     // and one that never does, and no score threshold, a low one and one that prunes
     private static String getDigest(AminoAcidSet aaSet, boolean generic) throws Exception {
+        return getDigest(aaSet, generic, new int[]{300, 650, 1200});
+    }
+
+    private static String getDigest(AminoAcidSet aaSet, boolean generic, int[] nominalPeptideMasses) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         for (boolean direction : new boolean[]{false, true}) {
-            for (int nominalPeptideMass : new int[]{300, 650, 1200}) {
+            for (int nominalPeptideMass : nominalPeptideMasses) {
                 for (int capacity : new int[]{1, 100, 10000}) {
                     for (int threshold : new int[]{NO_THRESHOLD, 0, 30}) {
                         DeNovoGraph<NominalMass> graph = getGraph(aaSet, generic, direction, nominalPeptideMass);
@@ -122,6 +133,36 @@ public class GeneratingFunctionTest {
         ParamManager paramManager = new ParamManager("MS-GF+", "test", "test", "test");
         paramManager.addMSGFPlusParams();
         return AminoAcidSet.getAminoAcidSetFromModFile(modFile.getPath(), paramManager);
+    }
+
+    @Test
+    public void negativeSinkMasses() throws Exception {
+        int[] masses = {-100, -62, -61, -1, 0, 1};
+        assertEquals("57e84754ad8c893e9a3c64340c9c0340505718440ce5e210e0dc205473c24458", getDigest(AminoAcidSet.getStandardAminoAcidSetWithFixedCarbamidomethylatedCys(), false, masses));
+        assertEquals("328e0eb866481ff65b96eeb0767c8a6a38e1ad50566a281b44fd1f9ea279b835", getDigest(getAASetWithTerminalAndNegativeMods(), false, masses));
+    }
+
+    @Test
+    public void precursorWindowCrossingZeroCompletes() throws Exception {
+        File spectra = temporaryFolder.newFile("wide.mgf");
+        try (PrintWriter writer = new PrintWriter(spectra, "UTF-8")) {
+            writer.println("BEGIN IONS\nTITLE=wide\nPEPMASS=100\nCHARGE=2+\nSCANS=1");
+            for (int mass : new int[]{40, 51, 63, 78, 87, 95, 105, 115, 122, 134, 142, 155, 162, 177, 188})
+                writer.println(mass + " 50");
+            writer.println("END IONS");
+        }
+        File database = temporaryFolder.newFile("wide.fasta");
+        try (PrintWriter writer = new PrintWriter(database, "UTF-8")) {
+            writer.println(">protein\nAAAAKR");
+        }
+        File result = new File(temporaryFolder.getRoot(), "wide.mzid");
+        ParamManager params = new ParamManager("MS-GF+", "test", "test", "test");
+        params.addMSGFPlusParams();
+        assertNull(params.parseParams(new String[]{"-s", spectra.getPath(), "-d", database.getPath(),
+                "-o", result.getPath(), "-t", "200Da", "-minLength", "3", "-maxLength", "6",
+                "-e", "0", "-ntt", "0", "-thread", "1", "-tasks", "1"}));
+        assertNull(MSGFPlus.runMSGFPlus(params));
+        assertTrue(new String(Files.readAllBytes(result.toPath()), StandardCharsets.UTF_8).contains("<SpectrumIdentificationItem"));
     }
 
     @Test
