@@ -45,10 +45,21 @@ public class DBScanner {
     private Map<SpecKey, PriorityQueue<DatabaseMatch>> specKeyDBMatchMap;
     private Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap;
 
-    // The peptide mass map of the spectra, copied into sorted arrays so that a mass window is found by binary search
+    // When the database is searched by suffix range: the matches of the ranges that have finished but cannot be
+    // merged yet because an earlier range is still running, per spectrum key, in the order the walk created them;
+    // the number of ranges merged so far; and the merged queues (see addRangeDBMatches)
+    private List<Map<SpecKey, List<DatabaseMatch>>> rangeMatchLists;
+    private int numMergedRanges;
+    private int maxRangesAhead;
+    private Map<SpecKey, PriorityQueue<DatabaseMatch>> mergedRangeDBMatchMap;
+
+    // Unsynchronized copies of the spectrum maps for the search, which only reads them; the synchronized
+    // wrappers in ScoredSpectraMap would serialize suffix ranges searched in parallel on the same scanner.
+    // The peptide mass map is kept as sorted arrays, so that a mass window is found by binary search
     // (the masses are positive and never NaN, so primitive comparison orders them as Double.compareTo did).
     private double[] searchPepMassKeys;
     private List<SpecKey> searchPepMassSpecKeyList;
+    private Map<SpecKey, SimpleDBSearchScorer<NominalMass>> searchSpecKeyScorerMap;
 
     private ProgressData progress;
     private PrintStream output;
@@ -179,6 +190,7 @@ public class DBScanner {
                 searchPepMassSpecKeyList = Arrays.asList(specKeys);
                 searchPepMassKeys = keys;
             }
+            searchSpecKeyScorerMap = new HashMap<SpecKey, SimpleDBSearchScorer<NominalMass>>(specScanner.getSpecKeyScorerMap());
         }
     }
 
@@ -196,6 +208,113 @@ public class DBScanner {
                 high = mid;
         }
         return low;
+    }
+
+    /**
+     * Prepare for searching the database as numRanges suffix ranges, each with dbSearch(..., rangeIndex),
+     * followed by mergeRangeDBMatches. At most maxRangesAhead ranges beyond the merged ones are searched or
+     * held for merging at a time, which bounds the matches kept aside.
+     */
+    public void startRangeSearch(int numRanges, int maxRangesAhead) {
+        rangeMatchLists = new ArrayList<Map<SpecKey, List<DatabaseMatch>>>(Collections.<Map<SpecKey, List<DatabaseMatch>>>nCopies(numRanges, null));
+        numMergedRanges = 0;
+        this.maxRangesAhead = maxRangesAhead;
+        mergedRangeDBMatchMap = new HashMap<SpecKey, PriorityQueue<DatabaseMatch>>();
+    }
+
+    /**
+     * Ranges start in suffix-array order, so the first unmerged range is always being searched and this cannot deadlock.
+     */
+    private synchronized void waitUntilRangeMayStart(int rangeIndex) throws InterruptedException {
+        while (rangeIndex >= numMergedRanges + maxRangesAhead)
+            wait();
+    }
+
+    /**
+     * Take the matches of a finished suffix range. The ranges are merged in suffix-array order, each as soon as
+     * every range before it has finished, so the matches of only a few ranges are held at any time.
+     * The matches are replayed in the order a search of the whole array would have created them, through the
+     * same queue rule, so the merged queues end up identical to a whole-array search.
+     */
+    private synchronized void addRangeDBMatches(int rangeIndex, Map<SpecKey, List<DatabaseMatch>> matchListMap) {
+        rangeMatchLists.set(rangeIndex, matchListMap);
+        while (numMergedRanges < rangeMatchLists.size() && rangeMatchLists.get(numMergedRanges) != null) {
+            for (Entry<SpecKey, List<DatabaseMatch>> entry : rangeMatchLists.get(numMergedRanges).entrySet()) {
+                SpecKey specKey = entry.getKey();
+                PriorityQueue<DatabaseMatch> matchQueue = mergedRangeDBMatchMap.get(specKey);
+                if (matchQueue == null) {
+                    matchQueue = new PriorityQueue<DatabaseMatch>();
+                    mergedRangeDBMatchMap.put(specKey, matchQueue);
+                }
+                for (DatabaseMatch match : entry.getValue())
+                    addMatch(matchQueue, match);
+            }
+            rangeMatchLists.set(numMergedRanges, null);
+            numMergedRanges++;
+        }
+        notifyAll();
+    }
+
+    static void skipFully(InputStream in, long numBytes) throws IOException {
+        while (numBytes > 0) {
+            long skipped = in.skip(numBytes);
+            if (skipped <= 0) {
+                if (in.read() < 0)
+                    throw new EOFException();
+                skipped = 1;
+            }
+            numBytes -= skipped;
+        }
+    }
+
+    /**
+     * Split the suffix array into numRanges ranges of similar size.
+     * Every range starts at a suffix that shares at most minPeptideLength residues with the suffix before it,
+     * so no peptide is shared across a boundary and searching the ranges separately visits exactly the peptides
+     * a search of the whole array visits.
+     *
+     * @return numRanges+1 boundaries; range i is [boundaries[i], boundaries[i+1])
+     */
+    public int[] getSuffixRangeBoundaries(int numRanges) throws IOException {
+        int[] boundaries = new int[numRanges + 1];
+        boundaries[numRanges] = size;
+        try (DataInputStream nlcps = new DataInputStream(new BufferedInputStream(new FileInputStream(sa.getNeighboringLcpFile())))) {
+            // skip size and id
+            skipFully(nlcps, CompactSuffixArray.INT_BYTE_SIZE * 2);
+            int position = 0;    // the next suffix whose neighboring LCP will be read from the file
+            for (int i = 1; i < numRanges; i++) {
+                int target = (int) ((long) size * i / numRanges);
+                if (target < position)
+                    target = position;
+                skipFully(nlcps, target - position);
+                position = target;
+                // Move on to the first suffix that shares at most minPeptideLength residues with its predecessor: dbSearch
+                // resets the LCP at the start of a range, so a candidate of minPeptideLength or more (plus its preceding
+                // residue) can never span the boundary
+                while (position < size) {
+                    int lcp = nlcps.readByte();
+                    position++;
+                    if (lcp <= minPeptideLength) {
+                        break;
+                    }
+                }
+                // position is one past the suffix just read; if the file ended before such a suffix, the range is empty
+                boundaries[i] = position < size ? position - 1 : size;
+            }
+        }
+        return boundaries;
+    }
+
+    /**
+     * Add the merged matches of the suffix ranges searched with dbSearch(..., rangeIndex) to specKeyDBMatchMap,
+     * once every range has finished.
+     */
+    public void mergeRangeDBMatches() {
+        if (numMergedRanges < rangeMatchLists.size())
+            throw new IllegalStateException("Only " + numMergedRanges + " of " + rangeMatchLists.size() + " suffix ranges finished");
+        rangeMatchLists = null;
+        this.addDBMatches(mergedRangeDBMatchMap);
+        mergedRangeDBMatchMap = null;
     }
 
     public Map<SpecKey, PriorityQueue<DatabaseMatch>> getSpecKeyDBMatchMap() {
@@ -247,11 +366,31 @@ public class DBScanner {
     }
 
     public void dbSearch(int numberOfAllowableNonEnzymaticTermini, int fromIndex, int toIndex, boolean verbose) {
+        dbSearch(numberOfAllowableNonEnzymaticTermini, fromIndex, toIndex, verbose, -1);
+    }
+
+    /**
+     * Search the suffixes [fromIndex, toIndex) of the database.
+     *
+     * @param rangeIndex when the search is split into suffix ranges (see startRangeSearch), the index of this range;
+     *                   the matches are then kept aside for mergeRangeDBMatches instead of being added to the results.
+     */
+    public void dbSearch(int numberOfAllowableNonEnzymaticTermini, int fromIndex, int toIndex, boolean verbose, int rangeIndex) {
         if (progress == null) {
             progress = new ProgressData();
         }
+        if (rangeIndex >= 0) {
+            try {
+                waitUntilRangeMayStart(rangeIndex);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
 
         Map<SpecKey, PriorityQueue<DatabaseMatch>> curSpecKeyDBMatchMap = new HashMap<SpecKey, PriorityQueue<DatabaseMatch>>();
+        // in key order of first match, so that the merged map has the same iteration order as a whole-array search
+        Map<SpecKey, List<DatabaseMatch>> curMatchListMap = rangeIndex >= 0 ? new LinkedHashMap<SpecKey, List<DatabaseMatch>>() : null;
 
         CandidatePeptideGrid candidatePepGrid;
         if (enzyme != null && !ignoreNTermMetCleavage)
@@ -274,17 +413,18 @@ public class DBScanner {
         copySpectrumMaps();
         double[] pepMassKeys = this.searchPepMassKeys;
         List<SpecKey> pepMassSpecKeyList = this.searchPepMassSpecKeyList;
+        Map<SpecKey, SimpleDBSearchScorer<NominalMass>> specKeyScorerMap = this.searchSpecKeyScorerMap;
 
         try {
             DataInputStream indices = new DataInputStream(new BufferedInputStream(new FileInputStream(sa.getIndexFile())));
 
             // skip size and id
-            indices.skip(CompactSuffixArray.INT_BYTE_SIZE * 2 + CompactSuffixArray.INT_BYTE_SIZE * fromIndex);
+            skipFully(indices, CompactSuffixArray.INT_BYTE_SIZE * 2 + (long) CompactSuffixArray.INT_BYTE_SIZE * fromIndex);
 
             DataInputStream nlcps = new DataInputStream(new BufferedInputStream(new FileInputStream(sa.getNeighboringLcpFile())));
 
             // skip size
-            nlcps.skip(CompactSuffixArray.INT_BYTE_SIZE * 2 + fromIndex);
+            skipFully(nlcps, CompactSuffixArray.INT_BYTE_SIZE * 2 + (long) fromIndex);
             CompactFastaSequence sequence = sa.getSequence();
 
             boolean isProteinNTerm = true;
@@ -593,7 +733,7 @@ public class DBScanner {
 //								{
 //								}
 
-                                SimpleDBSearchScorer<NominalMass> scorer = specScanner.getSpecKeyScorerMap().get(specKey);
+                                SimpleDBSearchScorer<NominalMass> scorer = specKeyScorerMap.get(specKey);
 //								if(sequence.getSubsequence(index, index+i+1).equalsIgnoreCase("SRDTAIKT"))
 //									System.out.println("Debug");
                                 int score = cleavageScore + scorer.getScore(candidatePepGrid.getPRMGrid(j), candidatePepGrid.getNominalPRMGrid(j), 1, pepLength + 1, candidatePepGrid.getNumMods(j));
@@ -607,6 +747,14 @@ public class DBScanner {
                                     DatabaseMatch dbMatch = new DatabaseMatch(index, (byte) (pepLength + 2), score, theoPeptideMass, nominalPeptideMass, specKey.getCharge(), candidatePepGrid.getPeptideSeq(j), scorer.getActivationMethodArr()).setProteinNTerm(isProteinNTerm).setProteinCTerm(isProteinCTerm);
                                     dbMatch.setNTermMetCleaved(isNTermMetCleaved);
                                     addMatch(prevMatchQueue, dbMatch);
+                                    if (curMatchListMap != null) {
+                                        List<DatabaseMatch> matchList = curMatchListMap.get(specKey);
+                                        if (matchList == null) {
+                                            matchList = new ArrayList<DatabaseMatch>();
+                                            curMatchListMap.put(specKey, matchList);
+                                        }
+                                        matchList.add(dbMatch);
+                                    }
                                     if (prevMatchList[peptideLengthIndex] == null)
                                         prevMatchList[peptideLengthIndex] = new MatchList();
                                     prevMatchList[peptideLengthIndex].add(dbMatch);
@@ -617,7 +765,10 @@ public class DBScanner {
                     isExtensionAtTheSameIndex = true;
                 }
             }
-            this.addDBMatches(curSpecKeyDBMatchMap);
+            if (rangeIndex >= 0)
+                addRangeDBMatches(rangeIndex, curMatchListMap);
+            else
+                this.addDBMatches(curSpecKeyDBMatchMap);
             indices.close();
             nlcps.close();
         } catch (IOException e) {
