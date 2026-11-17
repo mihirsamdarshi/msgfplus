@@ -4,10 +4,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -35,8 +37,11 @@ public class SearchSchedulingTest {
         try (PrintWriter writer = new PrintWriter(database, "UTF-8")) {
             writer.println(">protein\nAAAAKR");
         }
-        File result = new File(temporaryFolder.getRoot(), "result.mzid");
-        File logFile = temporaryFolder.newFile("search.log");
+        return search(spectra, database, new File(temporaryFolder.getRoot(), "result.mzid"), heap, tasks);
+    }
+
+    private String search(File spectra, File database, File result, String heap, int tasks) throws Exception {
+        File logFile = temporaryFolder.newFile(result.getName() + ".log");
         List<String> command = Arrays.asList(
                 new File(System.getProperty("java.home"), "bin/java").getPath(), "-Xmx" + heap,
                 "-cp", System.getProperty("java.class.path"), MSGFPlus.class.getName(),
@@ -81,5 +86,50 @@ public class SearchSchedulingTest {
             reports++;
         }
         assertTrue("no phase progress was reported", reports > 0);
+    }
+
+    // The spectra of the results in the order they are written
+    private List<String> getResultOrder(File result) throws Exception {
+        String mzid = new String(Files.readAllBytes(result.toPath()), StandardCharsets.UTF_8);
+        Matcher results = Pattern.compile("<SpectrumIdentificationResult [^>]*spectrumID=\"([^\"]+)\"").matcher(mzid);
+        List<String> order = new ArrayList<String>();
+        while (results.find())
+            order.add(results.group(1));
+        return order;
+    }
+
+    @Test
+    public void batchesKeepTheOrderOfEqualResults() throws Exception {
+        // Every spectrum twice: the two copies get the same SpecEValue, so only the order of the results orders them
+        File source = new File(SearchSchedulingTest.class.getClassLoader().getResource("test.mgf").toURI());
+        File spectra = temporaryFolder.newFile("duplicated.mgf");
+        try (BufferedReader reader = Files.newBufferedReader(source.toPath(), StandardCharsets.UTF_8);
+             PrintWriter writer = new PrintWriter(spectra, "UTF-8")) {
+            StringBuilder spectrum = new StringBuilder();
+            int numSpectra = 0;
+            String line;
+            while (numSpectra < 200 && (line = reader.readLine()) != null) {
+                spectrum.append(line).append('\n');
+                if (line.startsWith("END IONS")) {
+                    writer.print(spectrum);
+                    writer.print(spectrum);
+                    spectrum.setLength(0);
+                    numSpectra++;
+                }
+            }
+        }
+        File database = new File(temporaryFolder.getRoot(), "Tryp_Pig_Bov.fasta");
+        Files.copy(new File(SearchSchedulingTest.class.getClassLoader().getResource("Tryp_Pig_Bov.fasta").toURI()).toPath(), database.toPath());
+
+        File oneBatch = new File(temporaryFolder.getRoot(), "oneBatch.mzid");
+        File manyBatches = new File(temporaryFolder.getRoot(), "manyBatches.mzid");
+        String log = search(spectra, database, oneBatch, "512m", 1);
+        assertTrue(log, log.contains("Spectrum 0-399 (total: 400)"));
+        log = search(spectra, database, manyBatches, "512m", 64);
+        assertFalse(log, log.contains("Spectrum 0-399 (total: 400)"));
+
+        List<String> order = getResultOrder(oneBatch);
+        assertFalse("no results", order.isEmpty());
+        assertEquals(order, getResultOrder(manyBatches));
     }
 }

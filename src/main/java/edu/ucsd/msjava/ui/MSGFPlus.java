@@ -16,7 +16,9 @@ import java.io.PrintStream;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -406,6 +408,7 @@ public class MSGFPlus {
         int nnet = 2 - ntt;
 
         try {
+            int numBatches = 0;
             int fromIndexGlobal = 0;
             while (fromIndexGlobal < specSize) {
                 int toIndexGlobal = getBatchEndIndex(specKeyList, fromIndexGlobal, maxSpecKeysPerBatch, scorerMemory, leftPrecursorMassTolerance, minIsotopeError);
@@ -502,6 +505,16 @@ public class MSGFPlus {
                 scanner.addResultsToList(resultList);
 
                 fromIndexGlobal = toIndexGlobal;
+                numBatches++;
+            }
+            if (numBatches > 1) {
+                // Results with equal SpecEValue are written in the order of this list. A search in one batch adds
+                // them in the order of one map of spectrum indices, so put the results of all batches in one map too
+                Map<Integer, MSGFPlusMatch> specIndexMatchMap = new HashMap<Integer, MSGFPlusMatch>();
+                for (MSGFPlusMatch match : resultList)
+                    specIndexMatchMap.put(match.getSpecIndex(), match);
+                resultList.clear();
+                resultList.addAll(specIndexMatchMap.values());
             }
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
